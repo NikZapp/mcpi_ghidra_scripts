@@ -47,6 +47,18 @@ type_name_map = {
 # and modify their names. this will be useful for stuff like 
 # xyz coordinates, and will make figuring out some functions 
 # way easier.
+# ---------------------------------------------------------------
+# Also for each function, check all functions inside of it and see 
+# if they use any params from the current func, and then name the
+# parameters
+
+def to_datatype(name):
+    name = name.strip()
+    if name.endswith("*"):
+        base = to_datatype(name[:-1].strip())
+        return PointerDataType(base)
+    base = dataTypeManager.getDataType("/" + name)
+    return base
 
 
 def define_function(address, name, return_type=None, params=None):
@@ -58,7 +70,7 @@ def define_function(address, name, return_type=None, params=None):
         return
 
     func.setName(name, SourceType.USER_DEFINED)
-    func.setCallingConvention("__thiscall")
+    func.setCallingConvention("__stdcall")
     
     if return_type and params is not None:
         param_list = []
@@ -89,14 +101,48 @@ for root, dirs, files in os.walk(file_path):
             file_name = os.path.splitext(os.path.basename(fullpath))[0]
             
             print(fullpath)
+            struct_name = file_name
+            class_struct = StructureDataType(struct_name, 0)
             
             with open(fullpath, 'r') as file:
                 for line in file.readlines():
                     # wooo! indentation staircase!
-                    if line.startswith("method"):
+                    if line.startswith("size"):
+                        m = re.match(r"size 0x([0-9a-fA-F]+);", line)
+                        if m:
+                            size = int(m.group(1), 16)
+                            class_struct.setLength(size)
+                    
+                    elif line.startswith("constructor"):
+                        m = re.match(r"constructor\s+\(([^)]+)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            param_str, addr = m.groups()
+                            params = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            define_function(int(addr, 16), struct_name + "::constructor", None, params)
+                    
+                    elif line.startswith("property"):
+                        m = re.match(r"property\s+(\w+)\s+(\w+)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            type_name, name, offset = m.groups()
+                            offset = int(offset, 16)
+                            dtype = to_datatype(type_name.strip())
+                            if dtype:
+                                struct_length = class_struct.getLength()
+                                if struct_length < offset + dtype.getLength():
+                                    print("Struct", struct_name, "is too small!")
+                                    print("Cannot fit", type_name, name, "at", offset, ", resizing")
+                                    class_struct.setLength(offset + dtype.getLength())
+                                class_struct.insertAtOffset(offset, dtype, 0, name, "")
+                            else:
+                                print("Unknown datatype", type_name)
+                    
+                    elif line.startswith("method"):
                         m = re.match(r"method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
                         if m:
                             ret, name, param_str, addr = m.groups()
-                            #print(m.groups())
-                            params = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
-                            define_function(int(addr, 16), file_name + "_" + name, ret, params)
+                            params = [[struct_name, "*this"]]
+                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            define_function(int(addr, 16), struct_name + "::" + name, ret, params)
+            
+            dataTypeManager.addDataType(class_struct, DataTypeConflictHandler.REPLACE_HANDLER)
+            print("Added", struct_name, "struct")
