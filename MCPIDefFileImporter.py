@@ -37,10 +37,17 @@ type_name_map = {
 }
 
 # TODO:
+# ---------------------------------------------------------------
 # Guess unknown datatypes by the offsets they use 
 # e.g. if you see thing + 0x123, 
 # find things you know with offset 0x123 and suggest the results
 # in a bookmark or comment
+# ---------------------------------------------------------------
+# For each function, get all calls to it, and check the parameters
+# and modify their names. this will be useful for stuff like 
+# xyz coordinates, and will make figuring out some functions 
+# way easier.
+
 
 def define_function(address, name, return_type=None, params=None):
     addr = toAddr(address)
@@ -51,6 +58,7 @@ def define_function(address, name, return_type=None, params=None):
         return
 
     func.setName(name, SourceType.USER_DEFINED)
+    func.setCallingConvention("__thiscall")
     
     if return_type and params is not None:
         param_list = []
