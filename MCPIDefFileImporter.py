@@ -52,6 +52,24 @@ type_name_map = {
 # if they use any params from the current func, and then name the
 # parameters
 
+color_enabled = False
+class TextColor:
+    reset = '\033[0;37;40m'
+    red = '\033[1;31;40m'
+    green = '\033[1;32;40m'
+
+def print_err(text):
+    if color_enabled:
+        print(TextColor.red + str(text) + TextColor.reset)
+    else:
+        print("E: " + str(text))
+
+def print_success(text):
+    if color_enabled:
+        print(TextColor.green + str(text) + TextColor.reset)
+    else:
+        print("I: " + str(text))
+
 def to_datatype(name):
     name = name.strip()
     if name.endswith("*"):
@@ -66,7 +84,7 @@ def define_function(address, name, return_type=None, params=None):
     func = getFunctionAt(addr)
     
     if not func:
-        print("Function missing at " + str(addr))
+        print_err("Function missing at %x" % address)
         return
 
     func.setName(name, SourceType.USER_DEFINED)
@@ -85,13 +103,13 @@ def define_function(address, name, return_type=None, params=None):
         try:
             sig = functionParser.parse(None, signature)
         except ParseException as e:
-            print(e)
-            print(" > In function", return_type, name)
+            print_err(e)
+            print_err("In function %s %s" % (return_type, name))
             return
         cmd = ApplyFunctionSignatureCmd(addr, sig, SourceType.USER_DEFINED)
         cmd.applyTo(currentProgram)
     
-    print("+ Defined function", return_type, name, "at", addr)
+    print_success("Defined function %s %s at %x" % (return_type, name, address))
 
 
 for root, dirs, files in os.walk(file_path):
@@ -129,12 +147,12 @@ for root, dirs, files in os.walk(file_path):
                             if dtype:
                                 struct_length = class_struct.getLength()
                                 if struct_length < offset + dtype.getLength():
-                                    print("Struct", struct_name, "is too small!")
-                                    print("Cannot fit", type_name, name, "at", offset, ", resizing")
+                                    print_err("Struct %s is too small!" % struct_name)
+                                    print_err("Cannot fit %s %s at +%x, resizing" % (type_name, name, offset))
                                     class_struct.setLength(offset + dtype.getLength())
                                 class_struct.insertAtOffset(offset, dtype, 0, name, "")
                             else:
-                                print("Unknown datatype", type_name)
+                                print_err("Unknown datatype %s" % type_name)
                     
                     elif line.startswith("method"):
                         m = re.match(r"method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
@@ -145,4 +163,4 @@ for root, dirs, files in os.walk(file_path):
                             define_function(int(addr, 16), struct_name + "::" + name, ret, params)
             
             dataTypeManager.addDataType(class_struct, DataTypeConflictHandler.REPLACE_HANDLER)
-            print("Added", struct_name, "struct")
+            print_success("Added %s struct" % struct_name)
