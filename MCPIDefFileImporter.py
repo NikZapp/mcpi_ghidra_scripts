@@ -118,8 +118,8 @@ def define_function(address, name, return_type=None, params=None):
     func = getFunctionAt(addr)
     
     if not func:
-        print_err("Function missing at %x" % address)
-        return
+        print_success("Function missing at %x, creating" % address)
+        func = createFunction(addr, name)
 
     func.setName(name, SourceType.USER_DEFINED)
     func.setCallingConvention("__stdcall") # ghidra's builtin __thiscall sucks. we can do better
