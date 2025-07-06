@@ -7,7 +7,7 @@
 #@runtime Jython
 
 from ghidra.program.model.symbol import SourceType
-from ghidra.program.model.data import PointerDataType, StructureDataType, DataTypeConflictHandler
+from ghidra.program.model.data import PointerDataType, StructureDataType, DataTypeConflictHandler, ArrayDataType, UnsignedIntegerDataType, UnsignedLongDataType
 from ghidra.program.model.listing import Function, ParameterImpl
 from ghidra.app.util.parser import FunctionSignatureParser
 from ghidra.app.util.cparser.C import ParseException
@@ -31,9 +31,27 @@ functionParser = FunctionSignatureParser(dataTypeManager, dtms)
 #for dt in dataTypeManager.getAllDataTypes():
 #    print(dt.getDataTypePath())
 
+
+
+
+
+# Define custom string type
+char_ptr  = PointerDataType(ghidra.program.model.data.CharDataType.dataType)
+size_type = UnsignedLongDataType()
+dummy_arr = ArrayDataType(UnsignedIntegerDataType.dataType, 16, 1)
+
+string_struct = StructureDataType("basic_string", 0)
+string_struct.add(char_ptr,    "data",  "")
+string_struct.add(size_type,   "size",  "")
+string_struct.add(dummy_arr,   "dummy", "")
+
+dataTypeManager.addDataType(string_struct, DataTypeConflictHandler.REPLACE_HANDLER)
+
+
+
 type_name_map = {
-    # Add stuff heree like 
-    # "const std::string" : "string-type-in-ghidra",
+    # Add stuff here like 
+    "std::string" : "basic_string *",
 }
 
 # TODO:
@@ -64,17 +82,32 @@ def print_err(text):
     else:
         print("E: " + str(text))
 
+
 def print_success(text):
     if color_enabled:
         print(TextColor.green + str(text) + TextColor.reset)
     else:
         print("I: " + str(text))
 
+
+def to_datatype_string(name):
+    name = name.strip()
+    if name.startswith("const"):
+        name = name[5:].strip()
+    if name in type_name_map:
+        name = type_name_map[name]
+    return name
+
+
 def to_datatype(name):
     name = name.strip()
+    if name.startswith("const"):
+        name = name[5:].strip()
     if name.endswith("*"):
         base = to_datatype(name[:-1].strip())
         return PointerDataType(base)
+    if name in type_name_map:
+        name = type_name_map[name]
     base = dataTypeManager.getDataType("/" + name)
     return base
 
@@ -94,7 +127,7 @@ def define_function(address, name, return_type=None, params=None):
         param_list = []
         for i, param in enumerate(params):
             param_type_raw = " ".join(param[:-1])
-            param_type = type_name_map.get(param_type_raw, param_type_raw)
+            param_type = to_datatype_string(param_type_raw)
             param_name = param[-1].strip()
             param_list.append(param_type + " " + param_name)
 
@@ -148,7 +181,7 @@ for root, dirs, files in os.walk(file_path):
                                 struct_length = class_struct.getLength()
                                 if struct_length < offset + dtype.getLength():
                                     print_err("Struct %s is too small!" % struct_name)
-                                    print_err("Cannot fit %s %s at +%x, resizing" % (type_name, name, offset))
+                                    print_err("Cannot fit %s %s at +0x%x, resizing" % (type_name, name, offset))
                                     class_struct.setLength(offset + dtype.getLength())
                                 class_struct.insertAtOffset(offset, dtype, 0, name, "")
                             else:
