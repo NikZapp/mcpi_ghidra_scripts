@@ -100,6 +100,7 @@ def to_datatype_string(name):
 
 
 def to_datatype(name):
+    # TODO: Parse arrays
     name = name.strip()
     if name.startswith("const"):
         name = name[5:].strip()
@@ -121,7 +122,7 @@ def define_function(address, name, return_type=None, params=None):
         return
 
     func.setName(name, SourceType.USER_DEFINED)
-    func.setCallingConvention("__stdcall")
+    func.setCallingConvention("__stdcall") # ghidra's builtin __thiscall sucks. we can do better
     
     if return_type and params is not None:
         param_list = []
@@ -154,10 +155,14 @@ for root, dirs, files in os.walk(file_path):
             print(fullpath)
             struct_name = file_name
             class_struct = StructureDataType(struct_name, 0)
+            has_vtable = False
+            vtable_struct = StructureDataType(struct_name + "_vtable", 0)
+            vtable_address = None
             
             with open(fullpath, 'r') as file:
                 for line in file.readlines():
                     # wooo! indentation staircase!
+                    # normal properties/methods/whatever
                     if line.startswith("size"):
                         m = re.match(r"size 0x([0-9a-fA-F]+);", line)
                         if m:
@@ -194,6 +199,48 @@ for root, dirs, files in os.walk(file_path):
                             params = [[struct_name, "*this"]]
                             params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
                             define_function(int(addr, 16), struct_name + "::" + name, ret, params)
+                    
+                    # vtable stuff
+                    elif line.startswith("vtable"):
+                        m = re.match(r"vtable\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            vtable_address = toAddr(int(m.group(1), 16))
+                    
+                    if line.startswith("vtable-size"):
+                        m = re.match(r"vtable-size 0x([0-9a-fA-F]+);", line)
+                        if m:
+                            size = int(m.group(1), 16)
+                            vtable_struct.setLength(size)
+                    
+                    elif line.startswith("virtual-method"):
+                        m = re.match(r"virtual-method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            if not vtable_address:
+                                print_err("VTable size is not defined but it has methods!")
+                                continue
+                            ret, name, param_str, offset = m.groups()
+                            offset = int(offset, 16)
+                            params = [[struct_name, "*this"]]
+                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            # i think multiple names will be defined for one function, but im not sure how thats gonna be handled
+                            # and i dont know how it *should* be handled, so i dont care
+                            # OH WAIT! just change the names in the vtable struct and dont(?) name the actual function
+                            # ehhh nvm, lets see if this works
+                            vtable_function_address = getInt(vtable_address.add(offset))
+                            define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
+                            dtype = to_datatype(ret.strip() + "*")
+                            vtable_struct.insertAtOffset(offset, dtype, 0, name, "vtable")
+            
+            if vtable_address:
+                # create and store at location
+                dataTypeManager.addDataType(vtable_struct, DataTypeConflictHandler.REPLACE_HANDLER)
+                clearListing(vtable_address, vtable_address.add(vtable_struct.getLength() - 1))
+                createData(vtable_address, vtable_struct)
+                # add to parent class (which is a struct too, thats fun)
+                dtype = to_datatype(struct_name + "_vtable*")
+                class_struct.insertAtOffset(0, dtype, 0, "vtable", "")
+                
+                print_success("Defined vtable %s_vtable" % struct_name)
             
             dataTypeManager.addDataType(class_struct, DataTypeConflictHandler.REPLACE_HANDLER)
             print_success("Added %s struct" % struct_name)
