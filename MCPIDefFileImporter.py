@@ -7,7 +7,7 @@
 #@runtime Jython
 
 from ghidra.program.model.symbol import SourceType
-from ghidra.program.model.data import PointerDataType, StructureDataType, DataTypeConflictHandler, ArrayDataType, UnsignedIntegerDataType, UnsignedLongDataType
+from ghidra.program.model.data import PointerDataType, StructureDataType, DataTypeConflictHandler, ArrayDataType, UnsignedIntegerDataType, UnsignedLongDataType, FunctionDefinitionDataType
 from ghidra.program.model.listing import Function, ParameterImpl
 from ghidra.app.util.parser import FunctionSignatureParser
 from ghidra.app.util.cparser.C import ParseException
@@ -247,8 +247,12 @@ for root, dirs, files in os.walk(file_path):
                             # ehhh nvm, lets see if this works
                             vtable_function_address = getInt(vtable_address.add(offset))
                             define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
-                            dtype = to_datatype(ret.strip() + "*")
-                            print(offset, dtype, name, struct_name + "_vtable")
+                            func = getFunctionAt(toAddr(vtable_function_address))
+                            if func:
+                                func_def = FunctionDefinitionDataType(func, True)
+                                dtype = PointerDataType(func_def)
+                            else:
+                                dtype = to_datatype(struct_name + "*")
                             struct_length = vtable_struct.getLength()
                             if struct_length < offset + dtype.getLength():
                                 print_err("VTable %s is too small!" % (struct_name + "_vtable"))
