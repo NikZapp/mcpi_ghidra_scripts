@@ -188,7 +188,7 @@ for root, dirs, files in os.walk(file_path):
                                     print_err("Struct %s is too small!" % struct_name)
                                     print_err("Cannot fit %s %s at +0x%x, resizing" % (type_name, name, offset))
                                     class_struct.setLength(offset + dtype.getLength())
-                                class_struct.insertAtOffset(offset, dtype, 0, name, "")
+                                class_struct.replaceAtOffset(offset, dtype, 0, name, "")
                             else:
                                 print_err("Unknown datatype %s" % type_name)
                     
@@ -248,7 +248,13 @@ for root, dirs, files in os.walk(file_path):
                             vtable_function_address = getInt(vtable_address.add(offset))
                             define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
                             dtype = to_datatype(ret.strip() + "*")
-                            vtable_struct.insertAtOffset(offset, dtype, 0, name, "vtable")
+                            print(offset, dtype, name, struct_name + "_vtable")
+                            struct_length = vtable_struct.getLength()
+                            if struct_length < offset + dtype.getLength():
+                                print_err("VTable %s is too small!" % (struct_name + "_vtable"))
+                                print_err("Cannot fit %s %s at +0x%x, resizing" % (ret, name, offset))
+                                vtable_struct.setLength(offset + dtype.getLength())
+                            vtable_struct.replaceAtOffset(offset, dtype, 0, name, "vtable")
             
             if vtable_address:
                 # create and store at location
@@ -257,7 +263,12 @@ for root, dirs, files in os.walk(file_path):
                 createData(vtable_address, vtable_struct)
                 # add to parent class (which is a struct too, thats fun)
                 dtype = to_datatype(struct_name + "_vtable*")
-                class_struct.insertAtOffset(0, dtype, 0, "vtable", "")
+                struct_length = class_struct.getLength()
+                if struct_length < dtype.getLength():
+                    print_err("Struct %s is empty!" % struct_name)
+                    print_err("Cannot fit vtable, resizing")
+                    class_struct.setLength(dtype.getLength())
+                class_struct.replaceAtOffset(0, dtype, 0, "vtable", "")
                 
                 print_success("Defined vtable %s_vtable" % struct_name)
             
