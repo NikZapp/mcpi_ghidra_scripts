@@ -200,6 +200,25 @@ for root, dirs, files in os.walk(file_path):
                             params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
                             define_function(int(addr, 16), struct_name + "::" + name, ret, params)
                     
+                    elif line.startswith("static-property"):
+                        m = re.match(r"static-property\s+(\w+)\s+(\w+)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            type_name, name, addr = m.groups()
+                            addr = int(addr, 16)
+                            address = toAddr(addr)
+                            dtype = to_datatype(type_name.strip())
+                            if dtype:
+                                clearListing(address, address.add(dtype.getLength() - 1))
+                                createData(address, dtype)
+                                symbol = getSymbolAt(address)
+                                if not symbol:
+                                    createLabel(address, struct_name + "::" + name, True)
+                                    symbol = getSymbolAt(address)
+                                symbol.setName(struct_name + "::" + name, SourceType.USER_DEFINED)
+                                print_success("Added static property %s %s at 0x%x" % (type_name, name, addr))
+                            else:
+                                print_err("Unknown datatype %s" % type_name)
+                    
                     # vtable stuff
                     elif line.startswith("vtable"):
                         m = re.match(r"vtable\s+0x([0-9a-fA-F]+);", line)
