@@ -110,8 +110,40 @@ def to_datatype(name):
     if name in type_name_map:
         name = type_name_map[name]
     base = dataTypeManager.getDataType("/" + name)
+    if not base:
+        print_err("Failed to convert '%s' to type!" % name)
     return base
 
+def parse_type_and_name(decl_str):
+    # i HATE c++
+    decl_str = decl_str.strip()
+    
+    array_match = re.search(r'\[([0-9]+)\]', decl_str)
+    array_len = None
+    if array_match:
+        array_len = int(array_match.group(1))
+        decl_str = decl_str[:array_match.start()].strip()
+        
+    array_match = re.search(r'\[0x([0-9a-fA-F]+)\]', decl_str)
+    if array_match:
+        array_len = int(array_match.group(1), 16)
+        decl_str = decl_str[:array_match.start()].strip()
+    
+    pointer_count = decl_str.count('*')
+    decl_str = decl_str.replace('*', '').strip()
+    
+    var_match = re.search(r'\s(\w+)*$', decl_str)
+    if not var_match:
+        raise ValueError("Could not parse variable name in: " + decl_str)
+    var_name = var_match.group(1)
+    type_str = decl_str[:var_match.start()].strip()
+    
+    type_str += "*" * pointer_count
+    base_type = to_datatype(type_str)
+    if array_len is not None:
+        base_type = ArrayDataType(base_type, array_len, base_type.getLength())
+    
+    return base_type, var_name
 
 def define_function(address, name, return_type=None, params=None):
     addr = toAddr(address)
@@ -152,7 +184,7 @@ for root, dirs, files in os.walk(file_path):
             fullpath = os.path.join(root, filename)
             file_name = os.path.splitext(os.path.basename(fullpath))[0]
             
-            print(fullpath)
+            #print(fullpath)
             struct_name = file_name
             class_struct = StructureDataType(struct_name, 0)
             has_vtable = False
@@ -161,6 +193,7 @@ for root, dirs, files in os.walk(file_path):
             
             with open(fullpath, 'r') as file:
                 for line in file.readlines():
+                    m = None
                     # wooo! indentation staircase!
                     # normal properties/methods/whatever
                     if line.startswith("size"):
@@ -177,20 +210,20 @@ for root, dirs, files in os.walk(file_path):
                             define_function(int(addr, 16), struct_name + "::constructor", None, params)
                     
                     elif line.startswith("property"):
-                        m = re.match(r"property\s+(\w+)\s+(\w+)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"property\s+(.*)\s+=\s+0x([0-9a-fA-F]+);", line)
                         if m:
-                            type_name, name, offset = m.groups()
+                            declaration, offset = m.groups()
+                            dtype, name = parse_type_and_name(declaration)
                             offset = int(offset, 16)
-                            dtype = to_datatype(type_name.strip())
                             if dtype:
                                 struct_length = class_struct.getLength()
                                 if struct_length < offset + dtype.getLength():
                                     print_err("Struct %s is too small!" % struct_name)
-                                    print_err("Cannot fit %s %s at +0x%x, resizing" % (type_name, name, offset))
+                                    print_err("Cannot fit %s at +0x%x, resizing" % (declaration, offset))
                                     class_struct.setLength(offset + dtype.getLength())
                                 class_struct.replaceAtOffset(offset, dtype, 0, name, "")
                             else:
-                                print_err("Unknown datatype %s" % type_name)
+                                print_err("Unknown datatype %s" % declaration)
                     
                     elif line.startswith("method"):
                         m = re.match(r"method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
@@ -201,12 +234,12 @@ for root, dirs, files in os.walk(file_path):
                             define_function(int(addr, 16), struct_name + "::" + name, ret, params)
                     
                     elif line.startswith("static-property"):
-                        m = re.match(r"static-property\s+(\w+)\s+(\w+)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"static-property\s+(.*)\s+=\s+0x([0-9a-fA-F]+);", line)
                         if m:
-                            type_name, name, addr = m.groups()
+                            declaration, addr = m.groups()
+                            dtype, name = parse_type_and_name(declaration)
                             addr = int(addr, 16)
                             address = toAddr(addr)
-                            dtype = to_datatype(type_name.strip())
                             if dtype:
                                 clearListing(address, address.add(dtype.getLength() - 1))
                                 createData(address, dtype)
@@ -215,28 +248,34 @@ for root, dirs, files in os.walk(file_path):
                                     createLabel(address, struct_name + "::" + name, True)
                                     symbol = getSymbolAt(address)
                                 symbol.setName(struct_name + "::" + name, SourceType.USER_DEFINED)
-                                print_success("Added static property %s %s at 0x%x" % (type_name, name, addr))
+                                print_success("Added static property %s at 0x%x" % (declaration, addr))
                             else:
-                                print_err("Unknown datatype %s" % type_name)
+                                print_err("Unknown datatype %s" % declaration)
+                    
+                    elif line.startswith("static-method"):
+                        m = re.match(r"static-method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            ret, name, param_str, addr = m.groups()
+                            params = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            define_function(int(addr, 16), struct_name + "::" + name, ret, params)
                     
                     # vtable stuff
-                    elif line.startswith("vtable"):
-                        m = re.match(r"vtable\s+0x([0-9a-fA-F]+);", line)
-                        if m:
-                            vtable_address = toAddr(int(m.group(1), 16))
-                    
-                    if line.startswith("vtable-size"):
+                    elif line.startswith("vtable-size"):
                         m = re.match(r"vtable-size 0x([0-9a-fA-F]+);", line)
                         if m:
                             size = int(m.group(1), 16)
                             vtable_struct.setLength(size)
+                    
+                    elif line.startswith("vtable"):
+                        m = re.match(r"vtable\s+0x([0-9a-fA-F]+);", line)
+                        if m:
+                            vtable_address = toAddr(int(m.group(1), 16))
                     
                     elif line.startswith("virtual-method"):
                         m = re.match(r"virtual-method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
                         if m:
                             if not vtable_address:
                                 print_err("VTable size is not defined but it has methods!")
-                                continue
                             ret, name, param_str, offset = m.groups()
                             offset = int(offset, 16)
                             params = [[struct_name, "*this"]]
@@ -245,9 +284,10 @@ for root, dirs, files in os.walk(file_path):
                             # and i dont know how it *should* be handled, so i dont care
                             # OH WAIT! just change the names in the vtable struct and dont(?) name the actual function
                             # ehhh nvm, lets see if this works
-                            vtable_function_address = getInt(vtable_address.add(offset))
-                            define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
-                            func = getFunctionAt(toAddr(vtable_function_address))
+                            if vtable_address:
+                                vtable_function_address = getInt(vtable_address.add(offset))
+                                define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
+                                func = getFunctionAt(toAddr(vtable_function_address))
                             if func:
                                 func_def = FunctionDefinitionDataType(func, True)
                                 dtype = PointerDataType(func_def)
@@ -259,13 +299,22 @@ for root, dirs, files in os.walk(file_path):
                                 print_err("Cannot fit %s %s at +0x%x, resizing" % (ret, name, offset))
                                 vtable_struct.setLength(offset + dtype.getLength())
                             vtable_struct.replaceAtOffset(offset, dtype, 0, name, "vtable")
-            
+                    elif line.startswith("//"):
+                        m = True
+                    elif line.strip() == "":
+                        m = True
+                    
+                    if not m:
+                        print_err("Could not parse line:")
+                        print_err(line)
+                    
             if vtable_address:
                 # create and store at location
-                dataTypeManager.addDataType(vtable_struct, DataTypeConflictHandler.REPLACE_HANDLER)
                 clearListing(vtable_address, vtable_address.add(vtable_struct.getLength() - 1))
                 createData(vtable_address, vtable_struct)
+            if vtable_struct.getLength() > 1 or vtable_address:
                 # add to parent class (which is a struct too, thats fun)
+                dataTypeManager.addDataType(vtable_struct, DataTypeConflictHandler.REPLACE_HANDLER)
                 dtype = to_datatype(struct_name + "_vtable*")
                 struct_length = class_struct.getLength()
                 if struct_length < dtype.getLength():
