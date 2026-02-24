@@ -89,7 +89,6 @@ def print_success(text):
     else:
         print("I: " + str(text))
 
-
 def to_datatype_string(name):
     name = name.strip()
     if name.startswith("const"):
@@ -114,23 +113,23 @@ def to_datatype(name):
         print_err("Failed to convert '%s' to type!" % name)
     return base
 
-def parse_type_and_name(decl_str):
+def parse_type_and_name(decl_str, convert_to_type=True):
     # i HATE c++
     decl_str = decl_str.strip()
+    
+    array_match = re.search(r'\[0x([0-9a-fA-F]+)\]', decl_str)
+    if array_match:
+        array_len = int(array_match.group(1), 16)
+        decl_str = decl_str[:array_match.start()].strip()
     
     array_match = re.search(r'\[([0-9]+)\]', decl_str)
     array_len = None
     if array_match:
         array_len = int(array_match.group(1))
         decl_str = decl_str[:array_match.start()].strip()
-        
-    array_match = re.search(r'\[0x([0-9a-fA-F]+)\]', decl_str)
-    if array_match:
-        array_len = int(array_match.group(1), 16)
-        decl_str = decl_str[:array_match.start()].strip()
     
-    pointer_count = decl_str.count('*')
-    decl_str = decl_str.replace('*', '').strip()
+    pointer_count = decl_str.count('*') + decl_str.count('&')
+    decl_str = decl_str.replace('*', '').replace('&', '').strip()
     
     var_match = re.search(r'\s(\w+)*$', decl_str)
     if not var_match:
@@ -139,11 +138,49 @@ def parse_type_and_name(decl_str):
     type_str = decl_str[:var_match.start()].strip()
     
     type_str += "*" * pointer_count
-    base_type = to_datatype(type_str)
-    if array_len is not None:
-        base_type = ArrayDataType(base_type, array_len, base_type.getLength())
-    
-    return base_type, var_name
+    if convert_to_type:
+        base_type = to_datatype(type_str)
+        if array_len is not None:
+            base_type = ArrayDataType(base_type, array_len, base_type.getLength())
+        return base_type, var_name
+    else:
+        if type_str in type_name_map:
+            type_str = type_name_map[type_str]
+        return type_str, var_name
+
+def preprocess_def_file(filepath, extended=False):
+    lines = []
+    post_lines = []
+    with open(filepath, 'r') as file:
+        for line in file.readlines():
+            m = re.match(r"extends\s+(\w+);", line.strip())
+            if m:
+                parent_name = m.group(1)
+                parent_path = os.path.join(os.path.dirname(filepath), parent_name + '.def')
+                if os.path.exists(parent_path):
+                    # Recursively read parent file
+                    parent_lines = preprocess_def_file(parent_path, extended=True)
+                    post_lines.append("// Extend: %s\n" % parent_name)
+                    post_lines.extend(parent_lines)
+                    print_success("Extended %s with %s" % (os.path.basename(filepath), parent_name))
+                else:
+                    print_err("Parent class file not found: %s" % parent_path)
+            else:
+                # Filter out commands that should not be inherited
+                stripped = line.strip()
+                if (extended and (
+                    stripped.startswith("extends ") or 
+                    stripped.startswith("size ") or
+                    stripped.startswith("vtable-size ") or
+                    stripped.startswith("vtable ") or 
+                    stripped.startswith("static-property ") or
+                    stripped.startswith("static-method ") or
+                    stripped.startswith("constructor ") or
+                    stripped.startswith("mark-as-simple ") or
+                    stripped.startswith("generate-custom-wrapper "))):
+                    continue
+                lines.append(line)
+    return lines + post_lines
 
 def define_function(address, name, return_type=None, params=None):
     addr = toAddr(address)
@@ -152,6 +189,7 @@ def define_function(address, name, return_type=None, params=None):
     if not func:
         print_success("Function missing at %x, creating" % address)
         func = createFunction(addr, name)
+        print(func, name)
 
     func.setName(name, SourceType.USER_DEFINED)
     func.setCallingConvention("__stdcall") # ghidra's builtin __thiscall sucks. we can do better
@@ -191,8 +229,12 @@ for root, dirs, files in os.walk(file_path):
             vtable_struct = StructureDataType(struct_name + "_vtable", 0)
             vtable_address = None
             
-            with open(fullpath, 'r') as file:
-                for line in file.readlines():
+            lines = preprocess_def_file(fullpath)
+            print(fullpath)
+            if fullpath.rstrip().endswith("ServerLevel.def"):
+                print("".join(lines))
+            for line in lines:
+                if True:
                     m = None
                     # wooo! indentation staircase!
                     # normal properties/methods/whatever
@@ -203,11 +245,13 @@ for root, dirs, files in os.walk(file_path):
                             class_struct.setLength(size)
                     
                     elif line.startswith("constructor"):
-                        m = re.match(r"constructor\s+\(([^)]+)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"constructor\s+\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
                         if m:
+                            dtype = struct_name + "*"
                             param_str, addr = m.groups()
-                            params = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
-                            define_function(int(addr, 16), struct_name + "::constructor", None, params)
+                            params = [[struct_name, "*this"]]
+                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            define_function(int(addr, 16), struct_name + "::constructor", dtype, params)
                     
                     elif line.startswith("property"):
                         m = re.match(r"property\s+(.*)\s+=\s+0x([0-9a-fA-F]+);", line)
@@ -218,20 +262,21 @@ for root, dirs, files in os.walk(file_path):
                             if dtype:
                                 struct_length = class_struct.getLength()
                                 if struct_length < offset + dtype.getLength():
-                                    print_err("Struct %s is too small!" % struct_name)
-                                    print_err("Cannot fit %s at +0x%x, resizing" % (declaration, offset))
+                                    #print_err("Struct %s is too small!" % struct_name)
+                                    #print_err("Cannot fit %s at +0x%x, resizing" % (declaration, offset))
                                     class_struct.setLength(offset + dtype.getLength())
                                 class_struct.replaceAtOffset(offset, dtype, 0, name, "")
                             else:
                                 print_err("Unknown datatype %s" % declaration)
                     
                     elif line.startswith("method"):
-                        m = re.match(r"method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"^\s*method\s+(.*)\(([^)]*)\)\s+(?:const\s+)*=\s+0x([0-9a-fA-F]+);", line)
                         if m:
-                            ret, name, param_str, addr = m.groups()
+                            declaration, param_str, addr = m.groups()
+                            dtype, name = parse_type_and_name(declaration, False)
                             params = [[struct_name, "*this"]]
                             params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
-                            define_function(int(addr, 16), struct_name + "::" + name, ret, params)
+                            define_function(int(addr, 16), struct_name + "::" + name, dtype, params)
                     
                     elif line.startswith("static-property"):
                         m = re.match(r"static-property\s+(.*)\s+=\s+0x([0-9a-fA-F]+);", line)
@@ -253,11 +298,12 @@ for root, dirs, files in os.walk(file_path):
                                 print_err("Unknown datatype %s" % declaration)
                     
                     elif line.startswith("static-method"):
-                        m = re.match(r"static-method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"static-method\s+(.*)\(([^)]*)\)\s+(?:const\s+)*=\s+0x([0-9a-fA-F]+);", line)
                         if m:
-                            ret, name, param_str, addr = m.groups()
+                            declaration, param_str, addr = m.groups()                            
+                            dtype, name = parse_type_and_name(declaration, False)
                             params = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
-                            define_function(int(addr, 16), struct_name + "::" + name, ret, params)
+                            define_function(int(addr, 16), struct_name + "::" + name, dtype, params)
                     
                     # vtable stuff
                     elif line.startswith("vtable-size"):
@@ -272,11 +318,12 @@ for root, dirs, files in os.walk(file_path):
                             vtable_address = toAddr(int(m.group(1), 16))
                     
                     elif line.startswith("virtual-method"):
-                        m = re.match(r"virtual-method\s+(\w+)\s+(\w+)\(([^)]*)\)\s+=\s+0x([0-9a-fA-F]+);", line)
+                        m = re.match(r"virtual-method\s+(?:const\s+)*(.*)\(([^)]*)\)\s+(?:const\s+)*=\s+0x([0-9a-fA-F]+);", line)
                         if m:
                             if not vtable_address:
                                 print_err("VTable size is not defined but it has methods!")
-                            ret, name, param_str, offset = m.groups()
+                            declaration, param_str, offset = m.groups()
+                            dtype, name = parse_type_and_name(declaration, False)
                             offset = int(offset, 16)
                             params = [[struct_name, "*this"]]
                             params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
@@ -286,7 +333,7 @@ for root, dirs, files in os.walk(file_path):
                             # ehhh nvm, lets see if this works
                             if vtable_address:
                                 vtable_function_address = getInt(vtable_address.add(offset))
-                                define_function(vtable_function_address, struct_name + "_vtable::" + name, ret, params)
+                                define_function(vtable_function_address, struct_name + "_vtable::" + name, dtype, params)
                                 func = getFunctionAt(toAddr(vtable_function_address))
                             if func:
                                 func_def = FunctionDefinitionDataType(func, True)
@@ -295,8 +342,8 @@ for root, dirs, files in os.walk(file_path):
                                 dtype = to_datatype(struct_name + "*")
                             struct_length = vtable_struct.getLength()
                             if struct_length < offset + dtype.getLength():
-                                print_err("VTable %s is too small!" % (struct_name + "_vtable"))
-                                print_err("Cannot fit %s %s at +0x%x, resizing" % (ret, name, offset))
+                                #print_err("VTable %s is too small!" % (struct_name + "_vtable"))
+                                #print_err("Cannot fit %s %s at +0x%x, resizing" % (dtype, name, offset))
                                 vtable_struct.setLength(offset + dtype.getLength())
                             vtable_struct.replaceAtOffset(offset, dtype, 0, name, "vtable")
                     elif line.startswith("//"):
