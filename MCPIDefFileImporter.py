@@ -189,7 +189,6 @@ def define_function(address, name, return_type=None, params=None):
     if not func:
         print_success("Function missing at %x, creating" % address)
         func = createFunction(addr, name)
-        print(func, name)
 
     func.setName(name, SourceType.USER_DEFINED)
     func.setCallingConvention("__stdcall") # ghidra's builtin __thiscall sucks. we can do better
@@ -201,8 +200,7 @@ def define_function(address, name, return_type=None, params=None):
             param_type = to_datatype_string(param_type_raw)
             param_name = param[-1].strip()
             param_list.append(param_type + " " + param_name)
-
-        #print(params)
+        
         signature = return_type + " " + name + "(" + ", ".join(param_list) + ")"
         try:
             sig = functionParser.parse(None, signature)
@@ -222,7 +220,6 @@ for root, dirs, files in os.walk(file_path):
             fullpath = os.path.join(root, filename)
             file_name = os.path.splitext(os.path.basename(fullpath))[0]
             
-            #print(fullpath)
             struct_name = file_name
             class_struct = StructureDataType(struct_name, 0)
             has_vtable = False
@@ -230,9 +227,6 @@ for root, dirs, files in os.walk(file_path):
             vtable_address = None
             
             lines = preprocess_def_file(fullpath)
-            print(fullpath)
-            if fullpath.rstrip().endswith("ServerLevel.def"):
-                print("".join(lines))
             for line in lines:
                 if True:
                     m = None
