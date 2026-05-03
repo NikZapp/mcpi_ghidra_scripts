@@ -8,28 +8,28 @@
 
 from ghidra.program.model.symbol import SourceType
 from ghidra.program.model.data import PointerDataType, StructureDataType, DataTypeConflictHandler, ArrayDataType, UnsignedIntegerDataType, UnsignedLongDataType, FunctionDefinitionDataType
+from ghidra.program.model.data import ParameterDefinitionImpl
 from ghidra.program.model.listing import Function, ParameterImpl
 from ghidra.app.util.parser import FunctionSignatureParser
 from ghidra.app.util.cparser.C import ParseException
 from ghidra.app.services import DataTypeManagerService
-from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
+from ghidra.app.cmd.function import ApplyFunctionSignatureCmd, FunctionRenameOption
 
 import os
 import re
 
-
-
-file_path = askDirectory("Select source folder", "Open").absolutePath
-
 # Global stuff
 dataTypeManager = currentProgram.getDataTypeManager()
 functionManager = currentProgram.getFunctionManager()
+symbolTable     = currentProgram.getSymbolTable()
 
 dtms = state.tool.getService(DataTypeManagerService)
 functionParser = FunctionSignatureParser(dataTypeManager, dtms)
 
-#for dt in dataTypeManager.getAllDataTypes():
-#    print(dt.getDataTypePath())
+try:
+    file_path = askDirectory("Select source folder", "Open").absolutePath
+except:
+    file_path = askFile("Choose a single file to parse", "Open").absolutePath
 
 
 
@@ -49,7 +49,7 @@ dataTypeManager.addDataType(string_struct, DataTypeConflictHandler.REPLACE_HANDL
 
 # Vectors
 def make_vector_type(inner_type_name):
-    print("TO_VECTOR: " + inner_type_name)
+    print_debug("TO_VECTOR: " + inner_type_name)
     vec_name = "vector_" + inner_type_name.replace(" ", "_").replace("*", "ptr")
     existing = dataTypeManager.getDataType("/" + vec_name)
     if existing:
@@ -96,6 +96,7 @@ class TextColor:
     red = '\033[1;31;40m'
     green = '\033[1;32;40m'
 
+
 def print_err(text):
     if color_enabled:
         print(TextColor.red + str(text) + TextColor.reset)
@@ -108,6 +109,25 @@ def print_success(text):
         print(TextColor.green + str(text) + TextColor.reset)
     else:
         print("I: " + str(text))
+
+
+debug_enabled = False
+def print_debug(text):
+    if debug_enabled:
+        print(str(text))
+
+
+def get_or_create_struct(name, size=0):
+    existing = dataTypeManager.getDataType("/" + name)
+    if existing and isinstance(existing, StructureDataType):
+        existing.deleteAll()
+        if size:
+            existing.setLength(size)
+        return existing
+    new_struct = StructureDataType(name, size)
+    dataTypeManager.addDataType(new_struct, DataTypeConflictHandler.REPLACE_HANDLER)
+    return dataTypeManager.getDataType("/" + name)
+
 
 def to_datatype_string(name):
     name = name.strip()
@@ -128,14 +148,14 @@ def to_datatype_string(name):
 
 
 def to_datatype(name):
-    print("parsing " + name)
+    print_debug("parsing " + name)
     # TODO: Parse arrays
     name = name.strip()
     
     # Handle std::vector<T>
     vec_match = re.match(r'std::vector\s*<\s*(.*?)\s*>\s*(\*+)?$', name)
     if vec_match:
-        print("vector type detected")
+        print_debug("vector type detected")
         inner_name = vec_match.group(1)
         ptrs = vec_match.group(2) or ""
         vec_type = make_vector_type(inner_name)
@@ -152,14 +172,22 @@ def to_datatype(name):
         name = type_name_map[name]
     base = dataTypeManager.getDataType("/" + name)
     if not base:
+        results = []
+        dataTypeManager.findDataTypes(name, results)
+        if results:
+            base = results[0]
+    if not base:
+        base = dataTypeManager.getDataType(name)
+    if not base:
         print_err("Failed to convert '%s' to type!" % name)
-    print(base)
+    print_debug(base)
     return base
+
 
 def parse_type_and_name(decl_str, convert_to_type=True):
     # i HATE c++
     decl_str = decl_str.strip()
-    print("parsing type and name: " + decl_str)
+    print_debug("parsing type and name: " + decl_str)
     
     # Handle array brackets first
     array_match = re.search(r'\[0x([0-9a-fA-F]+)\]', decl_str)
@@ -167,13 +195,13 @@ def parse_type_and_name(decl_str, convert_to_type=True):
     if array_match:
         array_len = int(array_match.group(1), 16)
         decl_str = decl_str[:array_match.start()].strip()
-        print("detected array with len " + str(array_len) + " : " + str(decl_str))
+        print_debug("detected array with len " + str(array_len) + " : " + str(decl_str))
     
     array_match = re.search(r'\[([0-9]+)\]', decl_str)
     if array_match:
         array_len = int(array_match.group(1))
         decl_str = decl_str[:array_match.start()].strip()
-        print("detected array with len " + str(array_len) + " : " + str(decl_str))
+        print_debug("detected array with len " + str(array_len) + " : " + str(decl_str))
     
     # Extract variable name from end
     var_match = re.search(r'([A-Za-z_]\w*)$', decl_str)
@@ -181,12 +209,12 @@ def parse_type_and_name(decl_str, convert_to_type=True):
         raise ValueError("Could not parse variable name in: " + decl_str)
     var_name = var_match.group(1)
     type_str = decl_str[:var_match.start()].strip()
-    print("type_str: '%s', var_name: '%s'" % (type_str, var_name))
+    print_debug("type_str: '%s', var_name: '%s'" % (type_str, var_name))
     
     # Check if it's a vector BEFORE stripping pointers
     vec_match = re.match(r'(std::vector\s*<.*?>)\s*(\*+|&+)?$', type_str)
     if vec_match:
-        print("detected vector!")
+        print_debug("detected vector!")
         if convert_to_type:
             base_type = to_datatype(type_str)
             if array_len is not None:
@@ -211,6 +239,7 @@ def parse_type_and_name(decl_str, convert_to_type=True):
         if type_str in type_name_map:
             type_str = type_name_map[type_str]
         return type_str, var_name
+
 
 def preprocess_def_file(filepath, extended=False):
     lines = []
@@ -246,6 +275,7 @@ def preprocess_def_file(filepath, extended=False):
                 lines.append(line)
     return lines + post_lines
 
+
 def define_function(address, name, return_type=None, params=None):
     addr = toAddr(address)
     func = getFunctionAt(addr)
@@ -272,22 +302,27 @@ def define_function(address, name, return_type=None, params=None):
             print_err(e)
             print_err("In function %s %s" % (return_type, name))
             return
-        cmd = ApplyFunctionSignatureCmd(addr, sig, SourceType.USER_DEFINED)
+        cmd = ApplyFunctionSignatureCmd(addr, sig, SourceType.USER_DEFINED, False, False, DataTypeConflictHandler.REPLACE_HANDLER, FunctionRenameOption.RENAME)
         cmd.applyTo(currentProgram)
     
     print_success("Defined function %s %s at %x" % (return_type, name, address))
 
 
-for root, dirs, files in os.walk(file_path):
+if os.path.isfile(file_path):
+    walk = [(os.path.dirname(file_path), [], [os.path.basename(file_path)])]
+else:
+    walk = os.walk(file_path)
+
+for root, dirs, files in walk:
     for filename in files:
         if filename.endswith('.def'):
             fullpath = os.path.join(root, filename)
             file_name = os.path.splitext(os.path.basename(fullpath))[0]
             
             struct_name = file_name
-            class_struct = StructureDataType(struct_name, 0)
+            class_struct = get_or_create_struct(struct_name)
             has_vtable = False
-            vtable_struct = StructureDataType(struct_name + "_vtable", 0)
+            vtable_struct = get_or_create_struct(struct_name + "_vtable")
             vtable_address = None
             
             lines = preprocess_def_file(fullpath)
