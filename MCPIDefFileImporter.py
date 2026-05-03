@@ -47,6 +47,26 @@ string_struct.add(dummy_arr,   "dummy", "")
 
 dataTypeManager.addDataType(string_struct, DataTypeConflictHandler.REPLACE_HANDLER)
 
+# Vectors
+def make_vector_type(inner_type_name):
+    print("TO_VECTOR: " + inner_type_name)
+    vec_name = "vector_" + inner_type_name.replace(" ", "_").replace("*", "ptr")
+    existing = dataTypeManager.getDataType("/" + vec_name)
+    if existing:
+        return existing
+    
+    inner_type = to_datatype(inner_type_name)
+    if not inner_type:
+        return None
+    
+    ptr_type = PointerDataType(inner_type)
+    vec_struct = StructureDataType(vec_name, 0)
+    vec_struct.add(ptr_type, "begin", "")
+    vec_struct.add(ptr_type, "end", "")
+    vec_struct.add(ptr_type, "capacity", "")
+    
+    dataTypeManager.addDataType(vec_struct, DataTypeConflictHandler.REPLACE_HANDLER)
+    return dataTypeManager.getDataType("/" + vec_name)
 
 
 type_name_map = {
@@ -91,6 +111,15 @@ def print_success(text):
 
 def to_datatype_string(name):
     name = name.strip()
+    
+    # Handle std::vector<T>
+    vec_match = re.match(r'std::vector\s*<\s*(.*?)\s*>\s*(\*+)?$', name)
+    if vec_match:
+        inner_name = vec_match.group(1)
+        ptrs = vec_match.group(2) or ""
+        vec_name = "vector_" + inner_name.replace(" ", "_").replace("*", "ptr")
+        return vec_name + ptrs  # will be resolved later by to_datatype
+    
     if name.startswith("const"):
         name = name[5:].strip()
     if name in type_name_map:
@@ -99,8 +128,21 @@ def to_datatype_string(name):
 
 
 def to_datatype(name):
+    print("parsing " + name)
     # TODO: Parse arrays
     name = name.strip()
+    
+    # Handle std::vector<T>
+    vec_match = re.match(r'std::vector\s*<\s*(.*?)\s*>\s*(\*+)?$', name)
+    if vec_match:
+        print("vector type detected")
+        inner_name = vec_match.group(1)
+        ptrs = vec_match.group(2) or ""
+        vec_type = make_vector_type(inner_name)
+        for _ in ptrs:
+            vec_type = PointerDataType(vec_type)
+        return vec_type
+    
     if name.startswith("const"):
         name = name[5:].strip()
     if name.endswith("*"):
@@ -111,33 +153,55 @@ def to_datatype(name):
     base = dataTypeManager.getDataType("/" + name)
     if not base:
         print_err("Failed to convert '%s' to type!" % name)
+    print(base)
     return base
 
 def parse_type_and_name(decl_str, convert_to_type=True):
     # i HATE c++
     decl_str = decl_str.strip()
+    print("parsing type and name: " + decl_str)
     
+    # Handle array brackets first
     array_match = re.search(r'\[0x([0-9a-fA-F]+)\]', decl_str)
+    array_len = None
     if array_match:
         array_len = int(array_match.group(1), 16)
         decl_str = decl_str[:array_match.start()].strip()
+        print("detected array with len " + str(array_len) + " : " + str(decl_str))
     
     array_match = re.search(r'\[([0-9]+)\]', decl_str)
-    array_len = None
     if array_match:
         array_len = int(array_match.group(1))
         decl_str = decl_str[:array_match.start()].strip()
+        print("detected array with len " + str(array_len) + " : " + str(decl_str))
     
-    pointer_count = decl_str.count('*') + decl_str.count('&')
-    decl_str = decl_str.replace('*', '').replace('&', '').strip()
-    
-    var_match = re.search(r'\s(\w+)*$', decl_str)
+    # Extract variable name from end
+    var_match = re.search(r'([A-Za-z_]\w*)$', decl_str)
     if not var_match:
         raise ValueError("Could not parse variable name in: " + decl_str)
     var_name = var_match.group(1)
     type_str = decl_str[:var_match.start()].strip()
+    print("type_str: '%s', var_name: '%s'" % (type_str, var_name))
     
-    type_str += "*" * pointer_count
+    # Check if it's a vector BEFORE stripping pointers
+    vec_match = re.match(r'(std::vector\s*<.*?>)\s*(\*+|&+)?$', type_str)
+    if vec_match:
+        print("detected vector!")
+        if convert_to_type:
+            base_type = to_datatype(type_str)
+            if array_len is not None:
+                base_type = ArrayDataType(base_type, array_len, base_type.getLength())
+            return base_type, var_name
+        else:
+            return to_datatype_string(type_str), var_name
+    
+    # Remove pointers/references
+    # why are they the same thing!??!?!??
+    # I *HATE* C++!!!!!
+    pointer_count = type_str.count('*') + type_str.count('&')
+    type_str = type_str.replace('*', '').replace('&', '').strip()
+    type_str += '*' * pointer_count
+    
     if convert_to_type:
         base_type = to_datatype(type_str)
         if array_len is not None:
@@ -200,7 +264,7 @@ def define_function(address, name, return_type=None, params=None):
             param_type = to_datatype_string(param_type_raw)
             param_name = param[-1].strip()
             param_list.append(param_type + " " + param_name)
-        
+
         signature = return_type + " " + name + "(" + ", ".join(param_list) + ")"
         try:
             sig = functionParser.parse(None, signature)
@@ -243,8 +307,9 @@ for root, dirs, files in os.walk(file_path):
                         if m:
                             dtype = struct_name + "*"
                             param_str, addr = m.groups()
-                            params = [[struct_name, "*this"]]
-                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            param_array = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            params = [] if any(len(p) > 1 and p[1] == '*self' for p in param_array) else [[struct_name, "*self"]]
+                            params += param_array
                             define_function(int(addr, 16), struct_name + "::constructor", dtype, params)
                     
                     elif line.startswith("property"):
@@ -268,8 +333,9 @@ for root, dirs, files in os.walk(file_path):
                         if m:
                             declaration, param_str, addr = m.groups()
                             dtype, name = parse_type_and_name(declaration, False)
-                            params = [[struct_name, "*this"]]
-                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            param_array = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            params = [] if any(len(p) > 1 and p[1] == '*self' for p in param_array) else [[struct_name, "*self"]]
+                            params += param_array
                             define_function(int(addr, 16), struct_name + "::" + name, dtype, params)
                     
                     elif line.startswith("static-property"):
@@ -319,16 +385,19 @@ for root, dirs, files in os.walk(file_path):
                             declaration, param_str, offset = m.groups()
                             dtype, name = parse_type_and_name(declaration, False)
                             offset = int(offset, 16)
-                            params = [[struct_name, "*this"]]
-                            params += [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            param_array = [p.strip().split() for p in param_str.split(",")] if param_str.strip() else []
+                            params = [] if any(len(p) > 1 and p[1] == '*self' for p in param_array) else [[struct_name, "*self"]]
+                            params += param_array
                             # i think multiple names will be defined for one function, but im not sure how thats gonna be handled
                             # and i dont know how it *should* be handled, so i dont care
                             # OH WAIT! just change the names in the vtable struct and dont(?) name the actual function
                             # ehhh nvm, lets see if this works
+                            func = None
                             if vtable_address:
                                 vtable_function_address = getInt(vtable_address.add(offset))
                                 define_function(vtable_function_address, struct_name + "_vtable::" + name, dtype, params)
                                 func = getFunctionAt(toAddr(vtable_function_address))
+                            
                             if func:
                                 func_def = FunctionDefinitionDataType(func, True)
                                 dtype = PointerDataType(func_def)
